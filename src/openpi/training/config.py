@@ -287,6 +287,9 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
     """
 
     extra_delta_transform: bool = False
+    # When True, also remap an `intent` column from the dataset through the pipeline
+    # (slot-intent finetune). Leaves non-intent configs untouched when False.
+    include_intent: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -298,18 +301,17 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # For your own dataset, first figure out what keys your environment passes to the policy server
         # and then modify the mappings below so your dataset's keys get matched to those target keys.
         # The repack transform simply remaps key names here.
+        repack_map = {
+            "observation/image": "image",
+            "observation/wrist_image": "wrist_image",
+            "observation/state": "state",
+            "actions": "actions",
+            "prompt": "prompt",
+        }
+        if self.include_intent:
+            repack_map["intent"] = "intent"
         repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/image": "image",
-                        "observation/wrist_image": "wrist_image",
-                        "observation/state": "state",
-                        "actions": "actions",
-                        "prompt": "prompt",
-                    }
-                )
-            ]
+            inputs=[_transforms.RepackTransform(repack_map)]
         )
 
         # The data transforms are applied to the data coming from the dataset *and* during inference.
@@ -759,6 +761,67 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+    ),
+    # Slot-intent finetune: action-head-only, 64D intent summed into adaRMS.
+    # Starts from the already-LIBERO-trained pi05_libero checkpoint and trains only
+    # the action expert + projections. See docs/pi05_slotintent_finetuning.md.
+    # Dry-run with the 6D mean-intent ckpt: override `--model.intent_dim 6 --data.repo_id ...`.
+    TrainConfig(
+        name="pi05_libero_intent",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False, intent_dim=64),
+        data=LeRobotLiberoDataConfig(
+            repo_id="ldahiya/libero_goal_slot_intent",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            include_intent=True,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False, intent_dim=64
+        ).get_freeze_filter_action_head_only(),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/group_data/maxlab/common_datasets/pandaliza/maxvla/openpi/pi05_libero/params",
+            # Backfill the freshly-initialized intent_proj (absent from pi05_libero ckpt).
+            missing_regex=".*(lora|intent_proj).*",
+        ),
+        num_train_steps=30_000,
+    ),
+    # No-intent control: identical action-head finetune (same data/steps/conventions)
+    # but intent_dim=0 / include_intent=False. The clean A/B partner for pi05_libero_intent
+    # to isolate the effect of slot-intent. See docs/pi05_slotintent_finetuning.md.
+    TrainConfig(
+        name="pi05_libero_nointent",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False, intent_dim=0),
+        data=LeRobotLiberoDataConfig(
+            repo_id="ldahiya/libero_goal_slot_intent",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            include_intent=False,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False, intent_dim=0
+        ).get_freeze_filter_action_head_only(),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/group_data/maxlab/common_datasets/pandaliza/maxvla/openpi/pi05_libero/params"
+        ),
         num_train_steps=30_000,
     ),
     #

@@ -46,12 +46,16 @@ class CheckpointWeightLoader(WeightLoader):
     """
 
     params_path: str
+    # Regex for params present in the model but absent from the checkpoint that should be
+    # backfilled from the freshly-initialized reference params. Defaults to LoRA only;
+    # intent-conditioned finetunes widen this to also keep the new intent projection.
+    missing_regex: str = ".*lora.*"
 
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        # Add all missing LoRA weights.
-        return _merge_params(loaded_params, params, missing_regex=".*lora.*")
+        # Add all missing weights matching the regex (LoRA, and intent_proj for intent configs).
+        return _merge_params(loaded_params, params, missing_regex=self.missing_regex)
 
 
 @dataclasses.dataclass(frozen=True)

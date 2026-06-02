@@ -80,6 +80,11 @@ class LiberoInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
+        # Pass the optional slot-intent conditioning vector through to the model.
+        # Present only for intent-conditioned datasets/eval; absent otherwise.
+        if "intent" in data:
+            inputs["intent"] = data["intent"]
+
         return inputs
 
 

@@ -98,6 +98,13 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+        # Optional slot-intent projection: intent_dim -> action-expert width, summed
+        # into the adaRMS conditioning in embed_suffix. None when intent_dim == 0.
+        self.intent_proj = (
+            nnx.Linear(config.intent_dim, action_expert_config.width, rngs=rngs)
+            if getattr(config, "intent_dim", 0) > 0
+            else None
+        )
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -167,6 +174,9 @@ class Pi0(_model.BaseModel):
             time_emb = nnx.swish(time_emb)
             action_expert_tokens = action_tokens
             adarms_cond = time_emb
+            # Inject slot-intent conditioning (summed into adaRMS signal) when provided.
+            if self.intent_proj is not None and obs.intent is not None:
+                adarms_cond = adarms_cond + self.intent_proj(obs.intent)
         else:
             # mix timestep + action information using an MLP (no adaRMS)
             time_tokens = einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)

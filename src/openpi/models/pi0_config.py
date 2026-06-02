@@ -34,6 +34,9 @@ class Pi0Config(_model.BaseModelConfig):
 
     pytorch_compile_mode: str | None = "max-autotune"
 
+    # Dimension of the optional slot-intent conditioning vector (0 disables intent).
+    intent_dim: int = 0
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
@@ -115,3 +118,21 @@ class Pi0Config(_model.BaseModelConfig):
         if not filters:
             return nnx.Nothing
         return nnx.All(*filters)
+
+    def get_freeze_filter_action_head_only(self) -> nnx.filterlib.Filter:
+        """Freeze SigLIP + PaliGemma expert-0; train only the action expert and the
+        suffix projections (action_in/out_proj, time_mlp_*, intent_proj).
+
+        Used for action-head-only fine-tuning with intent conditioning (no LoRA).
+        See docs/pi05_slotintent_finetuning.md.
+        """
+        gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
+        action_expert_params_filter = nnx_utils.PathRegex(".*llm.*_1.*")
+        img_params_filter = nnx_utils.PathRegex(".*img.*")
+        # Freeze the vision tower and every gemma param that is NOT the action
+        # expert ('_1'). Top-level projection layers match neither regex, so they
+        # stay trainable.
+        return nnx.All(
+            nnx.Any(gemma_params_filter, img_params_filter),
+            nnx.Not(action_expert_params_filter),
+        )
