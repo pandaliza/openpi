@@ -100,6 +100,13 @@ class PI0Pytorch(nn.Module):
         self.action_in_proj = nn.Linear(config.action_dim, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, config.action_dim)
 
+        # Optional slot-intent projection (mirrors JAX pi0.py); None when intent_dim == 0.
+        self.intent_proj = (
+            nn.Linear(config.intent_dim, action_expert_config.width)
+            if getattr(config, "intent_dim", 0) > 0
+            else None
+        )
+
         if self.pi05:
             self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
             self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
@@ -235,7 +242,7 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks
 
-    def embed_suffix(self, state, noisy_actions, timestep):
+    def embed_suffix(self, state, noisy_actions, timestep, intent=None):
         """Embed state, noisy_actions, timestep to prepare for Expert Gemma processing."""
         embs = []
         pad_masks = []
@@ -296,6 +303,9 @@ class PI0Pytorch(nn.Module):
             time_emb = self._apply_checkpoint(time_mlp_func, time_emb)
             action_time_emb = action_emb
             adarms_cond = time_emb
+            # Inject slot-intent conditioning (summed into adaRMS signal) when provided.
+            if self.intent_proj is not None and intent is not None:
+                adarms_cond = adarms_cond + self.intent_proj(intent.to(adarms_cond.dtype))
 
         # Add to input tokens
         embs.append(action_time_emb)
@@ -329,7 +339,9 @@ class PI0Pytorch(nn.Module):
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(
+            state, x_t, time, getattr(observation, "intent", None)
+        )
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
             == torch.bfloat16
@@ -412,6 +424,7 @@ class PI0Pytorch(nn.Module):
                 past_key_values,
                 x_t,
                 expanded_time,
+                getattr(observation, "intent", None),
             )
 
             # Euler step - use new tensor assignment instead of in-place operation
@@ -426,9 +439,10 @@ class PI0Pytorch(nn.Module):
         past_key_values,
         x_t,
         timestep,
+        intent=None,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep, intent)
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]

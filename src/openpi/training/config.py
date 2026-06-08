@@ -824,6 +824,85 @@ _CONFIGS = [
         ),
         num_train_steps=30_000,
     ),
+    # Slot-intent finetune FROM THE GENERALIST pi05_base (not the already-LIBERO model):
+    # LoRA on the PaliGemma LLM (2B base frozen) + FULL finetune of the action expert,
+    # SigLIP, and intent_proj; 64D frozen intent summed into adaRMS (same intent dataset
+    # as pi05_libero_intent). Tests whether intent helps when the action head must actually
+    # learn LIBERO from a generalist init. See docs/pi05_slotintent_finetuning.md.
+    TrainConfig(
+        name="pi05_base_intent",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False, intent_dim=64,
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="ldahiya/libero_goal_slot_intent",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            include_intent=True,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        # LoRA freeze: freezes the 2B Gemma base (LoRA adapters stay trainable); the action
+        # expert is NOT LoRA, so it (and SigLIP + intent_proj) train fully.
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False, intent_dim=64,
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m",
+        ).get_freeze_filter(),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/group_data/maxlab/common_datasets/pandaliza/maxvla/openpi/pi05_base/params",
+            # Backfill freshly-initialized LoRA adapters + intent_proj (absent from pi05_base).
+            missing_regex=".*(lora|intent_proj).*",
+        ),
+        num_train_steps=30_000,
+        # Disk-constrained shared volume: keep 10k/20k/30k milestones + latest (default 5000
+        # kept 6 ckpts x20G and overran the quota). Auto-trims redundant intermediates on save.
+        keep_period=10_000,
+    ),
+    # No-intent control for pi05_base_intent: SAME LoRA-VL + full-action-head finetune from
+    # pi05_base, but intent_dim=0 / include_intent=False. The clean A/B partner that isolates
+    # the effect of slot-intent from the pi05_base init. See docs/pi05_slotintent_finetuning.md.
+    TrainConfig(
+        name="pi05_base_nointent",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False, intent_dim=0,
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="ldahiya/libero_goal_slot_intent",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            include_intent=False,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False, intent_dim=0,
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m",
+        ).get_freeze_filter(),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/group_data/maxlab/common_datasets/pandaliza/maxvla/openpi/pi05_base/params",
+            # Backfill freshly-initialized LoRA adapters (absent from pi05_base).
+            missing_regex=".*lora.*",
+        ),
+        num_train_steps=30_000,
+        # Disk-constrained shared volume: keep 10k/20k/30k milestones + latest (see pi05_base_intent).
+        keep_period=10_000,
+    ),
     #
     # Fine-tuning Aloha configs.
     #
